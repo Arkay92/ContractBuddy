@@ -1,7 +1,7 @@
+tf-keras
 galgebra 
 PyPDF2 
 tensorflow 
 transformers 
 peft 
-bitsandbytes
 networkx
