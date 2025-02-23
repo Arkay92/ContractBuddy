@@ -3,5 +3,5 @@ PyPDF2
 tensorflow 
 transformers 
 peft 
-bitsandbytes-cpu
+bitsandbytes
 networkx
