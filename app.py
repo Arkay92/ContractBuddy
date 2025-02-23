@@ -21,10 +21,8 @@ import streamlit as st
 
 # Setup IBM Granite model using 8-bit quantization.
 model_name = "ibm-granite/granite-3.1-2b-instruct"
-quantization_config = BitsAndBytesConfig(load_in_8bit=True)
 model = AutoModelForCausalLM.from_pretrained(
     model_name,
-    quantization_config=quantization_config,
     device_map="balanced",  # Adjust as needed.
     torch_dtype=torch.float16
 )
