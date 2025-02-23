@@ -11,7 +11,6 @@ import tensorflow as tf
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
-    BitsAndBytesConfig,
     pipeline
 )
 import torch
@@ -19,17 +18,21 @@ from PyPDF2 import PdfReader
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import streamlit as st
 
-# Setup IBM Granite model using 8-bit quantization.
+# Optionally, set environment variables to optimize CPU parallelism.
+os.environ["OMP_NUM_THREADS"] = "4"  # Adjust to your available cores.
+os.environ["MKL_NUM_THREADS"] = "4"
+
+# Setup IBM Granite model without 8-bit quantization (for CPU).
 model_name = "ibm-granite/granite-3.1-2b-instruct"
 model = AutoModelForCausalLM.from_pretrained(
     model_name,
-    device_map="balanced",  # Adjust as needed.
-    torch_dtype=torch.float16
+    device_map="balanced",  # Using balanced CPU mapping.
+    torch_dtype=torch.float16  # Use float16 if supported.
 )
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 
 DIM = 5000
-# We use a lower max token count for faster generation in this demo.
+# We use a lower max token count for faster generation.
 DEFAULT_MAX_TOKENS = 1000
 
 coords = symbols('e1 e2 e3')
@@ -54,14 +57,13 @@ KNOWLEDGE_GRAPH.add_edges_from([
 FILE_CACHE = {}
 SUMMARY_CACHE = {}
 
-# Initialize a summarization pipeline on CPU.
+# Initialize a summarization pipeline on CPU (using a lightweight model).
 summarizer = pipeline("summarization", model="t5-small", tokenizer="t5-small", device=-1)
 
 def read_file(file_obj):
     """
     Reads content from a file. Supports both file paths (str) and Streamlit uploaded files.
     """
-    # If file_obj is a string path:
     if isinstance(file_obj, str):
         if file_obj in FILE_CACHE:
             return FILE_CACHE[file_obj]
@@ -89,7 +91,6 @@ def read_file(file_obj):
             return FILE_CACHE[file_name]
         try:
             if file_name.lower().endswith(".pdf"):
-                # Use PdfReader on a BytesIO stream.
                 reader = PdfReader(io.BytesIO(file_obj.read()))
                 content = ""
                 for page in reader.pages:
@@ -102,17 +103,18 @@ def read_file(file_obj):
             st.error(f"Error reading uploaded file {file_name}: {e}")
             return ""
 
-def summarize_text(text, chunk_size=3000):
+def summarize_text(text, chunk_size=2000):
     """
     Summarize text if it is longer than chunk_size.
     Uses parallel processing for multiple chunks.
+    (Reducing chunk_size may speed up summarization on CPU.)
     """
     if len(text) <= chunk_size:
         return text
     chunks = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
     summaries = []
     with ThreadPoolExecutor() as executor:
-        futures = {executor.submit(summarizer, chunk, max_length=150, min_length=50, do_sample=False): chunk for chunk in chunks}
+        futures = {executor.submit(summarizer, chunk, max_length=100, min_length=30, do_sample=False): chunk for chunk in chunks}
         for future in as_completed(futures):
             summary = future.result()[0]["summary_text"]
             summaries.append(summary)
@@ -136,11 +138,17 @@ def read_files(file_objs, max_length=3000):
     SUMMARY_CACHE[cache_key] = summarized
     return summarized
 
-def format_prompt(system_msg, user_msg):
-    return [
-        {"role": "system", "content": system_msg},
-        {"role": "user", "content": user_msg}
-    ]
+def build_prompt(system_msg, document_content, user_prompt):
+    """
+    Build a unified prompt that explicitly delineates the system instructions, 
+    document content, and user prompt.
+    """
+    prompt_parts = []
+    prompt_parts.append("SYSTEM PROMPT:\n" + system_msg.strip())
+    if document_content:
+        prompt_parts.append("\nDOCUMENT CONTENT:\n" + document_content.strip())
+    prompt_parts.append("\nUSER PROMPT:\n" + user_prompt.strip())
+    return "\n\n".join(prompt_parts)
 
 def speculative_decode(input_text, max_tokens=DEFAULT_MAX_TOKENS, top_p=0.9, temperature=0.7):
     model_inputs = tokenizer([input_text], return_tensors="pt").to(model.device)
@@ -165,24 +173,28 @@ def post_process(text):
             unique_lines.append(clean_line)
     return "\n".join(unique_lines)
 
-def granite_analysis(prompt, file_objs=None, max_tokens=DEFAULT_MAX_TOKENS, top_p=0.9, temperature=0.7):
-    file_context = read_files(file_objs) if file_objs else ""
-    internal_context = f"\n[Internal Context]: {file_context.strip()}" if file_context else ""
-    refined_prompt = prompt + internal_context
-    system_message = (
-        "You are IBM Granite, an enterprise legal and technical analysis assistant. Your task is to critically analyze "
-        "contract documents with a special focus on identifying dangerous provisions, significant legal pitfalls, "
-        "and areas that could expose a party to high risks or liabilities."
+def granite_analysis(user_prompt, file_objs=None, max_tokens=DEFAULT_MAX_TOKENS, top_p=0.9, temperature=0.7):
+    # Read and summarize document content.
+    document_content = read_files(file_objs) if file_objs else ""
+    
+    # Define a clear system prompt.
+    system_prompt = (
+        "You are IBM Granite, an enterprise legal and technical analysis assistant. "
+        "Your task is to critically analyze the contract document provided below. "
+        "Pay special attention to identifying dangerous provisions, legal pitfalls, and potential liabilities. "
+        "Make sure to address both the overall contract structure and specific clauses where applicable."
     )
-    messages = format_prompt(system_message, refined_prompt)
-    input_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    response = speculative_decode(input_text, max_tokens=max_tokens, top_p=top_p, temperature=temperature)
+    
+    # Build a unified prompt with explicit sections.
+    unified_prompt = build_prompt(system_prompt, document_content, user_prompt)
+    
+    # Generate the analysis.
+    response = speculative_decode(unified_prompt, max_tokens=max_tokens, top_p=top_p, temperature=temperature)
     final_response = post_process(response)
     return final_response
 
 # --------- Streamlit App Interface ---------
 st.title("IBM Granite - Contract Analysis Assistant")
-
 st.markdown("Upload a contract document (PDF or text) and adjust the analysis prompt and generation parameters.")
 
 # File uploader (allows drag & drop)
@@ -196,13 +208,17 @@ default_prompt = (
 user_prompt = st.text_area("Analysis Prompt", default_prompt, height=150)
 
 # Sliders for generation parameters.
-max_tokens = st.slider("Maximum Tokens", min_value=100, max_value=2000, value=DEFAULT_MAX_TOKENS, step=100)
-temperature = st.slider("Temperature", min_value=0.0, max_value=1.0, value=0.7, step=0.1)
-top_p = st.slider("Top-p", min_value=0.0, max_value=1.0, value=0.9, step=0.05)
+max_tokens_slider = st.slider("Maximum Tokens", min_value=100, max_value=2000, value=DEFAULT_MAX_TOKENS, step=100)
+temperature_slider = st.slider("Temperature", min_value=0.0, max_value=1.0, value=0.7, step=0.1)
+top_p_slider = st.slider("Top-p", min_value=0.0, max_value=1.0, value=0.9, step=0.05)
 
 if st.button("Analyze Contract"):
     with st.spinner("Analyzing contract document..."):
-        result = granite_analysis(user_prompt, uploaded_files, max_tokens=max_tokens, top_p=top_p, temperature=temperature)
+        result = granite_analysis(user_prompt, uploaded_files, max_tokens=max_tokens_slider, top_p=top_p_slider, temperature=temperature_slider)
     st.success("Analysis complete!")
     st.markdown("### Analysis Output")
-    st.text_area("Output", result, height=400)
+    
+    keyword = "ASSISTANT PROMPT:"
+    text_after_keyword = result.rsplit(keyword, 1)[-1].strip()
+    
+    st.text_area("Output", text_after_keyword, height=400)
