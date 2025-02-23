@@ -44,8 +44,8 @@ A Streamlit application that integrates IBM Granite (a large language model) to 
 
 ### 1. Clone the Repository
 ```bash
-git clone https://github.com/Arkay92/ibm-granite-contract-analysis.git
-cd ibm-granite-contract-analysis
+git clone https://github.com/Arkay92/ContractBuddy.git
+cd ContractBuddy
 ```
 
 ### 2. Create a Virtual Environment (Optional but recommended)
